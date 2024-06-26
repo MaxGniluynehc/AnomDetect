@@ -1,25 +1,20 @@
 import matplotlib
 import matplotlib.pyplot as plt
-import pylab
-
+# import pylab
 import numpy as np
 import os
-import warnings
+# import warnings
 import pandas as pd
 import pickle
 from tqdm import tqdm
-
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.preprocessing import StandardScaler
-
-import tensorflow as tf
-from tensorflow.keras.layers import Dense, LSTM, Dropout, TimeDistributed,Flatten, Conv3D, MaxPooling3D
-from tensorflow.keras import Sequential
-
 import random
 matplotlib.use("TKagg")
-tf.random.set_seed(12345)
 random.seed(0)
+
+# get from https://www.kaggle.com/code/kyklosfraunhofer/anomaly-detection-on-nasa-bearings-dataset/notebook
+
 
 # =============== Load raw data =============== #
 def load_from_csv(DIR):
@@ -56,28 +51,54 @@ def load_raw_data(force=False):
             print("test",i, "already loaded.")
             continue
         x = load_from_csv(DIRS[i])
-        with open("test"+str(i)+".pkz", "wb") as file:
+        os.makedirs("ConvLSTM_data", exist_ok=True)
+        with open("ConvLSTM_data/" + "test"+str(i)+".pkz", "wb") as file:
             pickle.dump(x, file)
 
 
 load_raw_data(force=False)
 
 
+# Compare file_no = 90 vs 970, bearing 1 signal changed dramatically
+with open("ConvLSTM_data/test1.pkz", "rb") as file:
+    raw_data_test2 = pickle.load(file)
+    raw_data_test2.shape
+    matplotlib.use("TkAgg")
+    fig, ax = plt.subplots(4,1 ,sharex=True, sharey=True)
+    file_no = 90
+    for i in range(raw_data_test2.shape[-1]):
+        ax[i].plot(raw_data_test2[file_no,:,i], label=i)
+    ax[0].set_title("File No. {}".format(file_no))
+    ax[0].set_ylim([-2,2])
+
+
 # =============== Feature Engineering ================= #
+
 def binning(bins, raw_data):
     '''
     takes raw_data values and calculates the fft analysis of them. Then divides the fft data into bins and takes the mean of each bin.
-    :param bins: bins to devide the data into
+    :param bins: bins to divide the data into
     :param raw_data: data to analyse and put into bin afterwards
-    :retrun values: the values for each bin with shape:(length of test, number of bearings, number of bins)
+    :return values: the values for each bin with shape:(length of test, number of bearings, number of bins)
     '''
     values = np.zeros((raw_data.shape[0], raw_data.shape[2], len(bins) - 1))
     for j in tqdm(range(raw_data.shape[2]), desc="Binning Frequencies", ascii=True, ncols=100):
-        f = np.fft.fft(raw_data[:, :, j])
+        f = np.fft.fft(raw_data[:, :, j]) # (length of tests, total time steps per test)
         freq = np.fft.fftfreq(20480) * 20000
         for i in range(len(bins) - 1):
-            values[:, j, i] += np.absolute(f[:, (freq > bins[i]) & (freq <= bins[i + 1])]).mean(axis=1)
+            values[:, j, i] += np.absolute(f[:, (freq > bins[i]) & (freq <= bins[i + 1])]).mean(axis=1) # taking average of each bin
     return values
+
+
+bins = np.array([0,250,1000,2500,5000,10000])           # define bins to sort frequencies into
+with open("test1.pkz", "rb") as file:
+    raw_data_test2 = pickle.load(file)
+    raw_data_test2.shape # (length of tests, total time steps per term, dimension of bearing)
+    f = np.fft.fft(raw_data_test2[:,:,0])  # (length of tests, total time steps per term)
+    freq = np.fft.fftfreq(20480, d=1/20000)
+    values = np.zeros((raw_data_test2.shape[0], raw_data_test2.shape[2], len(bins) - 1))
+    for i in range(len(bins) - 1):
+        values[:, 0, i] += np.absolute(f[:, (freq > bins[i]) & (freq <= bins[i + 1])]).mean(axis=1)
 
 
 def feature_engeneering(raw_data):
@@ -91,9 +112,9 @@ def feature_engeneering(raw_data):
         raw_data = raw_data[:, :, [0, 2, 4, 6]]
     bins = np.array([0, 250, 1000, 2500, 5000, 10000])
     values = binning(bins, raw_data)
-    maxs = np.expand_dims(abs(raw_data).max(axis=1), 2)
-    stds = np.expand_dims(raw_data.std(axis=1), 2)
-    values = np.concatenate((maxs, stds, values), axis=2)
+    maxs = np.expand_dims(abs(raw_data).max(axis=1), 2) # (length of tests, num of bearings, 1)
+    stds = np.expand_dims(raw_data.std(axis=1), 2) # (length of tests, num of bearings, 1)
+    values = np.concatenate((maxs, stds, values), axis=2)   # (length of tests, number of bearings, 2 + num of bins)
 
     values = np.swapaxes(values, 1, 2)
     values = values.reshape((values.shape[0], values.shape[1] * values.shape[2]))
@@ -126,8 +147,7 @@ def load_data(force=False):
             pickle.dump(data, file)
     return data
 
-
-data = load_data(force = False) # load data
+data = load_data(force = False) # contains 3 test profiles, each (len of tests, num of bearing * num of engineered features)
 
 
 # ============= Prepare data (Rescaling) ================ #
@@ -166,6 +186,16 @@ def generate_sequences_no_padding(data, seq_len):
     return X, y
 
 
+with open("data.pkz", "rb") as file:
+    data = pickle.load(file)[1]
+    # data.shape
+    seq_len = 30
+    X = np.zeros([data.shape[0] - seq_len, seq_len, data.shape[1]])
+    for i in tqdm(range(0, seq_len), desc="Generating sequences", ascii=True, ncols=100):
+        X[:, i, :] = data[i:-seq_len + i, :]
+    y = data[seq_len:, :]
+
+
 def generate_sequences_pad_front(data, seq_len):
     '''
     generates sequences from data with padding zeros in front
@@ -177,7 +207,7 @@ def generate_sequences_pad_front(data, seq_len):
             (length of test, number of bearings*number of features engineered)
     '''
     X = np.zeros([data.shape[0], seq_len, data.shape[1]])
-    d = np.pad(data, ((seq_len, 0), (0, 0)), 'constant')
+    d = np.pad(data, ((seq_len, 0), (0, 0)), 'constant')  # d[seq_len:, :] == data
     for i in tqdm(range(0, seq_len), desc="Generating sequences", ascii=True, ncols=100):
         X[:, i, :] = d[i:-seq_len + i, :]
     y = data[:, :]
@@ -247,4 +277,3 @@ data_about_tests = [{"name": "1st", "length": 2156, "broken": [2,3]},
 
 seq_len=30 # sequence length
 X_train_series, X_test_series, y_train, y_test = prepare_data_series(data,seq_len, test_size=test_size) # generate train and test sets
-
