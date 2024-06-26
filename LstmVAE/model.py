@@ -4,7 +4,6 @@ import tensorflow as tf
 import six
 from timeit import default_timer as timer
 
-
 class LSTM_Var_Autoencoder(object):
 
     def __init__(self, intermediate_dim=None, z_dim=None, n_dim=None, kulback_coef=0.1,
